@@ -1,0 +1,29 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.github.spotifylyricshook'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'com.github.spotifylyricshook'
+        minSdk 29
+        targetSdk 34
+        versionCode 1
+        versionName "1.0.0"
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    compileOnly 'de.robv.android.xposed:api:82'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}

@@ -1,0 +1,47 @@
+name: Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Build release APK
+        run: ./gradlew assembleRelease
+
+      - name: Sign APK
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.KEY_PASS }}
+          STORE_PASS: ${{ secrets.STORE_PASS }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > keystore.jks
+          jarsigner -keystore keystore.jks \
+            -storepass "$STORE_PASS" \
+            -keypass "$KEY_PASS" \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            "$KEY_ALIAS"
+          mv app/build/outputs/apk/release/app-release-unsigned.apk \
+             spotify-lyrics-hook-${{ github.ref_name }}.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: spotify-lyrics-hook-*.apk
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: spotify-lyrics-hook-*.apk
