@@ -4,12 +4,14 @@ import android.graphics.Color;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
+import okhttp3.Response;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -45,19 +47,38 @@ public class MainHook implements IXposedHookLoadPackage {
                 .build()))
             .build();
 
+        // Hook 1: has_lyrics 检查 → 始终返回 true，强制 Spotify 走歌词 fetch 链
+        try {
+            Class<?> ctClass = lpparam.classLoader.loadClass("com.spotify.player.model.ContextTrack");
+            XposedHelpers.findAndHookMethod("p.g831", lpparam.classLoader, "x", ctClass,
+                new XC_MethodReplacement() {
+                    @Override
+                    protected Object replaceHookedMethod(MethodHookParam param) {
+                        boolean orig;
+                        try {
+                            orig = (boolean) XposedBridge.invokeOriginalMethod(
+                                param.method, param.thisObject, param.args);
+                        } catch (Throwable t) {
+                            orig = false;
+                        }
+                        if (!orig) {
+                            XposedBridge.log("[SLH] has_lyrics overridden → true");
+                        }
+                        return true;
+                    }
+                });
+            XposedBridge.log("[SLH] g831.x hook OK");
+        } catch (Throwable t) {
+            XposedBridge.log("[SLH] g831.x hook FAILED: " + t);
+        }
+
+        // Hook 2: track 切换时缓存歌名/歌手（metadata() 返回 fxy 实现了 Map，直接 cast）
         try {
             XposedHelpers.findAndHookMethod("p.cw30", lpparam.classLoader, "apply", Object.class,
                 new XC_MethodHook() {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) {
-                        int caseId;
-                        try {
-                            caseId = XposedHelpers.getIntField(param.thisObject, "a");
-                        } catch (Throwable t) {
-                            XposedBridge.log("[SLH] cw30 getIntField failed: " + t);
-                            return;
-                        }
-                        if (caseId != 14) return;
+                        if (XposedHelpers.getIntField(param.thisObject, "a") != 14) return;
                         try {
                             Object playerState = param.args[0];
                             Object trackWrapper = XposedHelpers.callMethod(playerState, "track");
@@ -67,18 +88,21 @@ public class MainHook implements IXposedHookLoadPackage {
                             String uri = (String) XposedHelpers.callMethod(contextTrack, "uri");
                             if (uri == null || uri.isEmpty() || sTrackCache.containsKey(uri)) return;
 
-                            Map<String, String> meta = getMetadata(contextTrack);
+                            Map<?, ?> meta = (Map<?, ?>) XposedHelpers.callMethod(contextTrack, "metadata");
                             if (meta == null) {
-                                XposedBridge.log("[SLH] metadata null for: " + uri);
+                                XposedBridge.log("[SLH] metadata null, uri=" + uri);
                                 return;
                             }
 
-                            String title = meta.get("title");
-                            String artist = meta.get("artist_name");
-                            if (artist == null) artist = meta.get("artist");
+                            String title = (String) meta.get("title");
+                            String artist = (String) meta.get("artist_name");
+                            if (artist == null) artist = (String) meta.get("artist");
+
                             if (title != null && !title.isEmpty()) {
                                 sTrackCache.put(uri, new String[]{title, artist != null ? artist : ""});
-                                XposedBridge.log("[SLH] cached: " + title + " - " + artist);
+                                XposedBridge.log("[SLH] cached: " + title + " / " + artist);
+                            } else {
+                                XposedBridge.log("[SLH] title empty, keys=" + meta.keySet());
                             }
                         } catch (Throwable t) {
                             XposedBridge.log("[SLH] cw30 hook error: " + t);
@@ -90,40 +114,34 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.log("[SLH] cw30 hook FAILED: " + t);
         }
 
+        // Hook 3: 歌词 entity 转 UI model，lines 为空时注入网易云
         try {
             XposedHelpers.findAndHookMethod("p.oj40", lpparam.classLoader, "apply", Object.class,
                 new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
-                        int caseId;
-                        try {
-                            caseId = XposedHelpers.getIntField(param.thisObject, "a");
-                        } catch (Throwable t) {
-                            XposedBridge.log("[SLH] oj40 getIntField failed: " + t);
-                            return;
-                        }
-                        if (caseId != 15) return;
+                        if (XposedHelpers.getIntField(param.thisObject, "a") != 15) return;
                         try {
                             Object tn40 = param.args[0];
                             List<?> lines = (List<?>) XposedHelpers.getObjectField(tn40, "b");
                             if (lines != null && !lines.isEmpty()) return;
 
                             String uri = (String) XposedHelpers.getObjectField(tn40, "a");
-                            XposedBridge.log("[SLH] empty lyrics for: " + uri);
+                            XposedBridge.log("[SLH] empty lyrics, uri=" + uri);
+
                             String[] info = sTrackCache.get(uri);
                             if (info == null) {
-                                XposedBridge.log("[SLH] no cache for uri: " + uri);
+                                XposedBridge.log("[SLH] no cache for uri=" + uri
+                                    + " (cache size=" + sTrackCache.size() + ")");
                                 return;
                             }
 
+                            XposedBridge.log("[SLH] fetching NetEase: " + info[0] + " / " + info[1]);
                             List<Object> om40Lines = fetchNetease(info[0], info[1], lpparam.classLoader);
-                            if (om40Lines == null || om40Lines.isEmpty()) {
-                                XposedBridge.log("[SLH] netease fetch empty for: " + info[0]);
-                                return;
-                            }
+                            if (om40Lines == null || om40Lines.isEmpty()) return;
 
                             param.setResult(buildAwc(om40Lines, lpparam.classLoader));
-                            XposedBridge.log("[SLH] injected " + om40Lines.size() + " lines for: " + info[0]);
+                            XposedBridge.log("[SLH] injected " + om40Lines.size() + " lines: " + info[0]);
                         } catch (Throwable t) {
                             XposedBridge.log("[SLH] oj40 hook error: " + t);
                         }
@@ -135,35 +153,58 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private static Map<String, String> getMetadata(Object contextTrack) {
-        String[] candidates = {"metadata", "getMetadataMap"};
-        for (String m : candidates) {
-            try {
-                return (Map<String, String>) XposedHelpers.callMethod(contextTrack, m);
-            } catch (Throwable ignored) {}
-        }
-        return null;
-    }
-
     private static List<Object> fetchNetease(String title, String artist, ClassLoader cl) {
         try {
             String q = URLEncoder.encode(title + " " + artist, "UTF-8");
-            String searchJson = sHttp.newCall(new Request.Builder()
-                .url("https://music.163.com/api/search/get?s=" + q + "&type=1&limit=5")
-                .build()).execute().body().string();
+            String searchUrl = "https://music.163.com/api/search/get?s=" + q + "&type=1&limit=5";
+            XposedBridge.log("[SLH] NetEase search: " + searchUrl);
 
-            JSONArray songs = new JSONObject(searchJson).getJSONObject("result").getJSONArray("songs");
-            if (songs.length() == 0) return null;
+            Response searchResp = sHttp.newCall(new Request.Builder().url(searchUrl).build()).execute();
+            if (!searchResp.isSuccessful()) {
+                XposedBridge.log("[SLH] NetEase search HTTP " + searchResp.code());
+                return null;
+            }
+            String searchBody = searchResp.body().string();
+
+            JSONObject resultObj = new JSONObject(searchBody).optJSONObject("result");
+            if (resultObj == null) {
+                XposedBridge.log("[SLH] NetEase search: no 'result' field, body=" + searchBody.substring(0, Math.min(200, searchBody.length())));
+                return null;
+            }
+            JSONArray songs = resultObj.optJSONArray("songs");
+            if (songs == null || songs.length() == 0) {
+                XposedBridge.log("[SLH] NetEase search: no songs for query=" + q);
+                return null;
+            }
+
             long songId = songs.getJSONObject(0).getLong("id");
+            String songName = songs.getJSONObject(0).optString("name");
+            XposedBridge.log("[SLH] NetEase matched: " + songName + " (id=" + songId + ")");
 
-            String lrcJson = sHttp.newCall(new Request.Builder()
-                .url("https://music.163.com/api/song/lyric?id=" + songId + "&lv=1")
-                .build()).execute().body().string();
+            String lrcUrl = "https://music.163.com/api/song/lyric?id=" + songId + "&lv=1";
+            Response lrcResp = sHttp.newCall(new Request.Builder().url(lrcUrl).build()).execute();
+            if (!lrcResp.isSuccessful()) {
+                XposedBridge.log("[SLH] NetEase lyric HTTP " + lrcResp.code());
+                return null;
+            }
+            String lrcBody = lrcResp.body().string();
 
-            String lrc = new JSONObject(lrcJson).getJSONObject("lrc").getString("lyric");
-            return parseLrc(lrc, cl);
+            JSONObject lrcObj = new JSONObject(lrcBody).optJSONObject("lrc");
+            if (lrcObj == null) {
+                XposedBridge.log("[SLH] NetEase lyric: no 'lrc' field");
+                return null;
+            }
+            String lrc = lrcObj.optString("lyric", "");
+            if (lrc.isEmpty()) {
+                XposedBridge.log("[SLH] NetEase lyric: empty lrc");
+                return null;
+            }
+
+            List<Object> result = parseLrc(lrc, cl);
+            XposedBridge.log("[SLH] parsed " + result.size() + " lines from LRC");
+            return result;
         } catch (Throwable t) {
+            XposedBridge.log("[SLH] fetchNetease error: " + t);
             return null;
         }
     }
