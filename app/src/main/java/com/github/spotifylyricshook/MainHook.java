@@ -4,6 +4,7 @@ import android.graphics.Color;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
@@ -33,6 +34,8 @@ public class MainHook implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
         if (!"com.spotify.music".equals(lpparam.packageName)) return;
 
+        XposedBridge.log("[SLH] handleLoadPackage: com.spotify.music");
+
         sHttp = new OkHttpClient.Builder()
             .connectTimeout(4, TimeUnit.SECONDS)
             .readTimeout(6, TimeUnit.SECONDS)
@@ -42,54 +45,94 @@ public class MainHook implements IXposedHookLoadPackage {
                 .build()))
             .build();
 
-        XposedHelpers.findAndHookMethod("p.cw30", lpparam.classLoader, "apply", Object.class,
-            new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (XposedHelpers.getIntField(param.thisObject, "a") != 14) return;
-                    try {
-                        Object playerState = param.args[0];
-                        Object trackWrapper = XposedHelpers.callMethod(playerState, "track");
-                        Object contextTrack = XposedHelpers.callMethod(trackWrapper, "h");
-                        if (contextTrack == null) return;
-
-                        String uri = (String) XposedHelpers.callMethod(contextTrack, "uri");
-                        if (uri == null || uri.isEmpty() || sTrackCache.containsKey(uri)) return;
-
-                        Map<String, String> meta = getMetadata(contextTrack);
-                        if (meta == null) return;
-
-                        String title = meta.get("title");
-                        String artist = meta.get("artist_name");
-                        if (artist == null) artist = meta.get("artist");
-                        if (title != null && !title.isEmpty()) {
-                            sTrackCache.put(uri, new String[]{title, artist != null ? artist : ""});
+        try {
+            XposedHelpers.findAndHookMethod("p.cw30", lpparam.classLoader, "apply", Object.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        int caseId;
+                        try {
+                            caseId = XposedHelpers.getIntField(param.thisObject, "a");
+                        } catch (Throwable t) {
+                            XposedBridge.log("[SLH] cw30 getIntField failed: " + t);
+                            return;
                         }
-                    } catch (Throwable ignored) {}
-                }
-            });
+                        if (caseId != 14) return;
+                        try {
+                            Object playerState = param.args[0];
+                            Object trackWrapper = XposedHelpers.callMethod(playerState, "track");
+                            Object contextTrack = XposedHelpers.callMethod(trackWrapper, "h");
+                            if (contextTrack == null) return;
 
-        XposedHelpers.findAndHookMethod("p.oj40", lpparam.classLoader, "apply", Object.class,
-            new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    if (XposedHelpers.getIntField(param.thisObject, "a") != 15) return;
-                    try {
-                        Object tn40 = param.args[0];
-                        List<?> lines = (List<?>) XposedHelpers.getObjectField(tn40, "b");
-                        if (lines != null && !lines.isEmpty()) return;
+                            String uri = (String) XposedHelpers.callMethod(contextTrack, "uri");
+                            if (uri == null || uri.isEmpty() || sTrackCache.containsKey(uri)) return;
 
-                        String uri = (String) XposedHelpers.getObjectField(tn40, "a");
-                        String[] info = sTrackCache.get(uri);
-                        if (info == null) return;
+                            Map<String, String> meta = getMetadata(contextTrack);
+                            if (meta == null) {
+                                XposedBridge.log("[SLH] metadata null for: " + uri);
+                                return;
+                            }
 
-                        List<Object> om40Lines = fetchNetease(info[0], info[1], lpparam.classLoader);
-                        if (om40Lines == null || om40Lines.isEmpty()) return;
+                            String title = meta.get("title");
+                            String artist = meta.get("artist_name");
+                            if (artist == null) artist = meta.get("artist");
+                            if (title != null && !title.isEmpty()) {
+                                sTrackCache.put(uri, new String[]{title, artist != null ? artist : ""});
+                                XposedBridge.log("[SLH] cached: " + title + " - " + artist);
+                            }
+                        } catch (Throwable t) {
+                            XposedBridge.log("[SLH] cw30 hook error: " + t);
+                        }
+                    }
+                });
+            XposedBridge.log("[SLH] cw30 hook OK");
+        } catch (Throwable t) {
+            XposedBridge.log("[SLH] cw30 hook FAILED: " + t);
+        }
 
-                        param.setResult(buildAwc(om40Lines, lpparam.classLoader));
-                    } catch (Throwable ignored) {}
-                }
-            });
+        try {
+            XposedHelpers.findAndHookMethod("p.oj40", lpparam.classLoader, "apply", Object.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        int caseId;
+                        try {
+                            caseId = XposedHelpers.getIntField(param.thisObject, "a");
+                        } catch (Throwable t) {
+                            XposedBridge.log("[SLH] oj40 getIntField failed: " + t);
+                            return;
+                        }
+                        if (caseId != 15) return;
+                        try {
+                            Object tn40 = param.args[0];
+                            List<?> lines = (List<?>) XposedHelpers.getObjectField(tn40, "b");
+                            if (lines != null && !lines.isEmpty()) return;
+
+                            String uri = (String) XposedHelpers.getObjectField(tn40, "a");
+                            XposedBridge.log("[SLH] empty lyrics for: " + uri);
+                            String[] info = sTrackCache.get(uri);
+                            if (info == null) {
+                                XposedBridge.log("[SLH] no cache for uri: " + uri);
+                                return;
+                            }
+
+                            List<Object> om40Lines = fetchNetease(info[0], info[1], lpparam.classLoader);
+                            if (om40Lines == null || om40Lines.isEmpty()) {
+                                XposedBridge.log("[SLH] netease fetch empty for: " + info[0]);
+                                return;
+                            }
+
+                            param.setResult(buildAwc(om40Lines, lpparam.classLoader));
+                            XposedBridge.log("[SLH] injected " + om40Lines.size() + " lines for: " + info[0]);
+                        } catch (Throwable t) {
+                            XposedBridge.log("[SLH] oj40 hook error: " + t);
+                        }
+                    }
+                });
+            XposedBridge.log("[SLH] oj40 hook OK");
+        } catch (Throwable t) {
+            XposedBridge.log("[SLH] oj40 hook FAILED: " + t);
+        }
     }
 
     @SuppressWarnings("unchecked")
